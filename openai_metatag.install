@@ -9,7 +9,7 @@
  * Implements hook_install().
  */
 function openai_metatag_install() {
-  // Enable auto-generate on save by default for fresh installs.
+  // Enable auto-generate on save by default for fresh installs via config/install JSON.
   $config = config('openai_metatag.settings');
 
   // Initialize enabled_bundles to all current node types (enabled = 1) if not set.
@@ -21,11 +21,8 @@ function openai_metatag_install() {
       $enabled_bundles[$type->type] = 1;
     }
     $config->set('enabled_bundles', $enabled_bundles);
+    $config->save();
   }
-
-  // Turn on auto generation by default on fresh install (site can change later).
-  $config->set('auto_generate_on_save', 1);
-  $config->save();
 }
 
 /**
@@ -34,8 +31,11 @@ function openai_metatag_install() {
 function openai_metatag_update_10001() {
   $config = config('openai_metatag.settings');
 
-  // Force-enable auto generation on save to meet the project's requirement.
-  $config->set('auto_generate_on_save', 1);
+  // Only set auto_generate_on_save if it's not already set (preserve admin choice).
+  $current_auto = $config->get('auto_generate_on_save');
+  if (!isset($current_auto)) {
+    $config->set('auto_generate_on_save', 1);
+  }
 
   // Ensure enabled_bundles exists and includes all current types.
   $current = $config->get('enabled_bundles');
@@ -51,5 +51,5 @@ function openai_metatag_update_10001() {
   $config->set('enabled_bundles', $current);
   $config->save();
 
-  return t('OpenAI Metatag: Enabled auto-generate on save and initialized enabled content types.');
+  return t('OpenAI Metatag: Initialized enabled content types.');
 }

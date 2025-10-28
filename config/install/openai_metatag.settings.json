@@ -1,0 +1,7 @@
+{
+  "enabled_bundles": {},
+  "auto_generate_on_save": 1,
+  "ai_model": "gpt-4o-mini",
+  "ai_max_tokens": 256
+}
+

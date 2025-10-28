@@ -2,7 +2,7 @@
 
 /**
  * @file
- * OpenAI Metatag Helper: Generate SEO metatags on node edit forms.
+ * OpenAI Metatag Assistant: Generate SEO metatags on node edit forms.
  */
 
 /**
@@ -25,7 +25,7 @@ function openai_metatag_menu() {
 
   $items['admin/config/openai/metatag'] = array(
     'title' => 'OpenAI Metatag Assistant',
-    'description' => 'Configure OpenAI Metatag helper per content type.',
+    'description' => 'Configure OpenAI Metatag Assistant per content type.',
     'page callback' => 'backdrop_get_form',
     'page arguments' => array('openai_metatag_settings_form'),
     'access arguments' => array('administer site configuration'),
