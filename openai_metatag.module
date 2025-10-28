@@ -1,0 +1,1050 @@
+<?php
+
+/**
+ * @file
+ * OpenAI Metatag Helper: Generate SEO metatags on node edit forms.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function openai_metatag_config_info() {
+  return array(
+    'openai_metatag.settings' => array(
+      'label' => t('OpenAI Metatag settings'),
+      'group' => t('Configuration'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function openai_metatag_menu() {
+  $items = array();
+
+  $items['admin/config/openai/metatag'] = array(
+    'title' => 'OpenAI Metatag Assistant',
+    'description' => 'Configure OpenAI Metatag helper per content type.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('openai_metatag_settings_form'),
+    'access arguments' => array('administer site configuration'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+/**
+ * Settings form builder.
+ */
+function openai_metatag_settings_form($form, &$form_state) {
+  $form = array();
+  $form['#config'] = 'openai_metatag.settings';
+
+  // List all node bundles.
+  $types = node_type_get_types();
+  $options = array();
+  foreach ($types as $type) {
+    $options[$type->type] = check_plain($type->name);
+  }
+
+  // Load and normalize enabled bundles from config.
+  $enabled_bundles = config_get('openai_metatag.settings', 'enabled_bundles');
+  if (is_array($enabled_bundles)) {
+    $normalized = array();
+    foreach ($enabled_bundles as $k => $v) {
+      if (!empty($v)) {
+        $normalized[$k] = 1;
+      }
+    }
+    $enabled_bundles = $normalized;
+  }
+  else {
+    // Default: enable for all bundles.
+    $enabled_bundles = array_fill_keys(array_keys($options), 1);
+  }
+
+  // Build default checked values as an array of selected keys (FAPI expects
+  // the option key as the value for checked items).
+  $default_selected = array();
+  foreach ($enabled_bundles as $bundle_key => $is_enabled) {
+    if (!empty($is_enabled)) {
+      $default_selected[$bundle_key] = $bundle_key;
+    }
+  }
+
+  $form['enabled_bundles'] = array(
+    '#type' => 'checkboxes',
+    '#title' => t('Enable on these content types'),
+    '#options' => $options,
+    '#default_value' => $default_selected,
+    '#description' => t('The button appears in the Meta tags fieldset when editing these content types.'),
+    '#element_validate' => array('openai_metatag_enabled_bundles_validate'),
+  );
+
+  $form['auto_generate_on_save'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Auto-generate meta tags on save'),
+    '#default_value' => (int) (config_get('openai_metatag.settings', 'auto_generate_on_save') ?: 0),
+    '#description' => t('When enabled, the module will generate missing tags on save for the selected content types. Existing values are never overwritten.'),
+  );
+
+  $form['notes'] = array(
+    '#type' => 'markup',
+    '#markup' => '<p>' . t('Note: Users must also have the permissions "Generate metatags with OpenAI" and "Edit meta tags" (or "Administer meta tags"). The Metatag fieldset must be available on the content type.') . '</p>',
+  );
+
+  // AI options: model + max tokens (module-level override; falls back to openai.settings).
+  $opts = config_get('openai_metatag.settings', 'options');
+  $opts = is_array($opts) ? $opts : array();
+  $form['options'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('AI options'),
+    '#tree' => TRUE,
+  );
+
+  // Model selector: reuse helper from openai_seo_advisor if available, otherwise fallback list.
+  if (function_exists('openai_seo_advisor_get_model_options')) {
+    $model_options = openai_seo_advisor_get_model_options();
+  }
+  else {
+    $model_options = array(
+      'gpt-4o-mini' => 'gpt-4o-mini',
+      'gpt-4o' => 'gpt-4o',
+      'gpt-4' => 'gpt-4',
+      'gpt-3.5-turbo' => 'gpt-3.5-turbo',
+      'text-davinci-003' => 'text-davinci-003',
+    );
+  }
+
+  $form['options']['ai_model'] = array(
+    '#type' => 'select',
+    '#title' => t('AI model'),
+    '#options' => $model_options,
+    '#default_value' => isset($opts['ai_model']) && $opts['ai_model'] !== '' ? $opts['ai_model'] : (config_get('openai.settings', 'default_text_model') ?: 'gpt-4o-mini'),
+    '#description' => t('Select which text model to use when generating metatags.'),
+  );
+
+  $form['options']['ai_max_tokens'] = array(
+    '#type' => 'number',
+    '#title' => t('AI max tokens'),
+    '#default_value' => isset($opts['ai_max_tokens']) ? (int) $opts['ai_max_tokens'] : 1000,
+    '#min' => 64,
+    '#max' => 2048,
+    '#description' => t('Maximum number of tokens the AI may return (min 64, max 2048).'),
+  );
+
+  // Pre-submit: sanitize values before system_settings_form saves them.
+  $form['#submit'][] = 'openai_metatag_settings_form_submit';
+
+  return system_settings_form($form);
+}
+
+/**
+ * Element validator: normalize enabled_bundles checkbox values to 1/0.
+ */
+function openai_metatag_enabled_bundles_validate(&$element, &$form_state, $form) {
+  if (isset($form_state['values']['enabled_bundles']) && is_array($form_state['values']['enabled_bundles'])) {
+    $normalized = array();
+    foreach ($form_state['values']['enabled_bundles'] as $bundle => $value) {
+      $normalized[$bundle] = !empty($value) ? 1 : 0;
+    }
+    $form_state['values']['enabled_bundles'] = $normalized;
+  }
+}
+
+function openai_metatag_settings_form_submit($form, &$form_state) {
+  // Normalize checkbox values to 1/0 so config exports are clean.
+  if (isset($form_state['values']['enabled_bundles']) && is_array($form_state['values']['enabled_bundles'])) {
+    $normalized = array();
+    foreach ($form_state['values']['enabled_bundles'] as $bundle => $value) {
+      $normalized[$bundle] = !empty($value) ? 1 : 0;
+    }
+    $form_state['values']['enabled_bundles'] = $normalized;
+  }
+  // Also normalize the boolean checkbox.
+  $form_state['values']['auto_generate_on_save'] = !empty($form_state['values']['auto_generate_on_save']) ? 1 : 0;
+
+  // Normalize options tree (ai_model, ai_max_tokens).
+  if (!isset($form_state['values']['options']) || !is_array($form_state['values']['options'])) {
+    $form_state['values']['options'] = array();
+  }
+  $opts =& $form_state['values']['options'];
+  $opts += array(
+    'ai_model' => (string) (config_get('openai.settings', 'default_text_model') ?: 'gpt-4o-mini'),
+    'ai_max_tokens' => 256,
+  );
+  $opts['ai_model'] = is_string($opts['ai_model']) ? trim($opts['ai_model']) : '';
+  $opts['ai_max_tokens'] = (int) $opts['ai_max_tokens'];
+  if ($opts['ai_max_tokens'] < 64) { $opts['ai_max_tokens'] = 64; }
+  if ($opts['ai_max_tokens'] > 2048) { $opts['ai_max_tokens'] = 2048; }
+
+  backdrop_set_message(t('OpenAI Metatag settings saved.'));
+}
+
+/**
+ * Implements hook_permission().
+ */
+function openai_metatag_permission() {
+  return array(
+    'generate metatags with openai' => array(
+      'title' => t('Generate metatags with OpenAI'),
+      'description' => t('Allows users to click a button on content forms to auto-fill Metatag fields using OpenAI.'),
+    ),
+  );
+}
+
+/**
+ * Ensure our form_alter runs after Metatag builds its form.
+ */
+function openai_metatag_module_implements_alter(&$implementations, $hook) {
+  if ($hook === 'form_alter' && isset($implementations['openai_metatag'])) {
+    // Move this module to the end so metatag_form_alter runs first.
+    $weight = $implementations['openai_metatag'];
+    unset($implementations['openai_metatag']);
+    $implementations['openai_metatag'] = $weight;
+  }
+}
+
+/**
+ * Helper to detect if we are on a node edit/create form.
+ */
+function _openai_metatag_is_node_form($form_id, $form) {
+  // Common Backdrop/Drupal patterns:
+  // - '<bundle>_node_form' (e.g., 'post_node_form')
+  // - 'node_form' (base form ID)
+  // - Sometimes #entity_type === 'node'
+  if (is_string($form_id)) {
+    if ($form_id === 'node_form' || substr($form_id, -10) === '_node_form') {
+      return TRUE;
+    }
+    if (strpos($form_id, 'node_') === 0 && !empty($form['#entity_type']) && $form['#entity_type'] === 'node') {
+      return TRUE;
+    }
+  }
+  if (!empty($form['#entity_type']) && $form['#entity_type'] === 'node') {
+    return TRUE;
+  }
+  // Also match inline or programmatic node edit forms.
+  if (!empty($form['#node_edit_form']) || (!empty($form['#entity']) && isset($form['#entity']->type))) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function openai_metatag_form_alter(&$form, &$form_state, $form_id) {
+  // Only act on node edit/create forms.
+  if (!_openai_metatag_is_node_form($form_id, $form)) {
+    return;
+  }
+
+  // Attach an after_build to ensure our button is injected even if Metatag
+  // builds its elements later or other modules re-order things.
+  if (empty($form['#after_build']) || !in_array('openai_metatag_after_build', $form['#after_build'])) {
+    $form['#after_build'][] = 'openai_metatag_after_build';
+  }
+
+  // Respect per-bundle enable setting (default all on).
+  $bundle = !empty($form['#bundle']) ? $form['#bundle'] : (!empty($form['#node_type']) ? $form['#node_type'] : (!empty($form['#entity']) && isset($form['#entity']->type) ? $form['#entity']->type : NULL));
+  $enabled_bundles = config_get('openai_metatag.settings', 'enabled_bundles');
+  if (is_array($enabled_bundles) && $bundle && empty($enabled_bundles[$bundle])) {
+    watchdog('openai_metatag', 'Form alter: bundle @bundle disabled for OpenAI Metatag.', array('@bundle' => $bundle), WATCHDOG_DEBUG);
+    return;
+  }
+
+  // Metatag fieldset is added by Metatag module as $form['metatags'] with language child.
+  if (empty($form['metatags']) || !is_array($form['metatags'])) {
+    // Defer to after_build; optionally message once for privileged users.
+    static $notified = FALSE;
+    if (!$notified && user_access('generate metatags with openai')) {
+      backdrop_set_message(t('OpenAI Metatag: Metatag fields are not available on this form yet. If they do not appear, ensure the Metatag module is enabled for this content type and that you have permission to edit meta tags.'), 'warning');
+      $notified = TRUE;
+    }
+    watchdog('openai_metatag', 'Form alter: metatags fieldset missing on initial alter for form_id @id.', array('@id' => $form_id), WATCHDOG_DEBUG);
+    return;
+  }
+
+  // Permission check: user must be able to edit meta tags and to generate via OpenAI.
+  if (!(user_access('edit meta tags') || user_access('administer meta tags'))) {
+    watchdog('openai_metatag', 'Form alter: user lacks Metatag edit/admin permission.', array(), WATCHDOG_DEBUG);
+    return;
+  }
+  // Allow site administrators to see the button even if the explicit permission
+  // was not granted yet (helps initial setup/debugging).
+  if (!(user_access('generate metatags with openai') || user_access('administer site configuration'))) {
+    watchdog('openai_metatag', 'Form alter: user lacks "generate metatags with openai" permission.', array(), WATCHDOG_DEBUG);
+    return;
+  }
+
+  // Determine langcode used by Metatag on this form.
+  $langcode = LANGUAGE_NONE;
+  if (!empty($form['metatags']['#language'])) {
+    $langcode = $form['metatags']['#language'];
+  }
+
+  // Ensure the language container exists (Metatag builds metatags[$langcode]).
+  if (empty($form['metatags'][$langcode]) || !is_array($form['metatags'][$langcode])) {
+    watchdog('openai_metatag', 'Form alter: metatags language container missing (@lang).', array('@lang' => $langcode), WATCHDOG_DEBUG);
+    return;
+  }
+
+  // Wrap the language container with an #ajax wrapper to update it after generation.
+  $wrapper_id = 'openai-metatag-wrapper-' . $langcode;
+  $form['metatags'][$langcode]['#prefix'] = '<div id="' . $wrapper_id . '">';
+  $form['metatags'][$langcode]['#suffix'] = '</div>';
+
+  // Add the Generate button near the top (just after intro text if present).
+  if (!isset($form['metatags']['openai_generate'])) {
+    $button = array(
+      '#type' => 'submit',
+      '#value' => t('Generate Metatags with OpenAI'),
+      '#submit' => array('openai_metatag_generate_submit'),
+      '#ajax' => array(
+        'callback' => 'openai_metatag_generate_ajax',
+        'wrapper' => $wrapper_id,
+        'method' => 'replace',
+        'effect' => 'fade',
+      ),
+      '#weight' => -9,
+    );
+    // Place inside the metatags fieldset root, before fields.
+    $form['metatags']['openai_generate'] = $button;
+  }
+}
+
+/**
+ * After build: ensure the Generate button is injected once Metatag elements exist.
+ */
+function openai_metatag_after_build($form, &$form_state) {
+  // Only process node forms.
+  $form_id = isset($form['#form_id']) ? $form['#form_id'] : '';
+  if (!_openai_metatag_is_node_form($form_id, $form)) {
+    return $form;
+  }
+
+  // Bundle enable check (default: enabled).
+  $bundle = !empty($form['#bundle']) ? $form['#bundle'] : (!empty($form['#node_type']) ? $form['#node_type'] : (!empty($form['#entity']) && isset($form['#entity']->type) ? $form['#entity']->type : NULL));
+  $enabled_bundles = config_get('openai_metatag.settings', 'enabled_bundles');
+  if (is_array($enabled_bundles) && $bundle && empty($enabled_bundles[$bundle])) {
+    return $form;
+  }
+
+  // Permissions.
+  if (!(user_access('edit meta tags') || user_access('administer meta tags'))) {
+    return $form;
+  }
+  // Allow site administrators to see the button even if the explicit permission
+  // was not granted yet (helps initial setup/debugging).
+  if (!(user_access('generate metatags with openai') || user_access('administer site configuration'))) {
+    return $form;
+  }
+
+  if (empty($form['metatags']) || !is_array($form['metatags'])) {
+    // Nothing to do if metatags fieldset truly absent.
+    return $form;
+  }
+
+  // Determine langcode and ensure container exists.
+  $langcode = !empty($form['metatags']['#language']) ? $form['metatags']['#language'] : LANGUAGE_NONE;
+  if (empty($form['metatags'][$langcode]) || !is_array($form['metatags'][$langcode])) {
+    return $form;
+  }
+
+  // Add wrapper if not present.
+  $wrapper_id = 'openai-metatag-wrapper-' . $langcode;
+  if (empty($form['metatags'][$langcode]['#prefix'])) {
+    $form['metatags'][$langcode]['#prefix'] = '<div id="' . $wrapper_id . '">';
+  }
+  if (empty($form['metatags'][$langcode]['#suffix'])) {
+    $form['metatags'][$langcode]['#suffix'] = '</div>';
+  }
+
+
+  // Inject the button if missing.
+  if (!isset($form['metatags']['openai_generate'])) {
+    $form['metatags']['openai_generate'] = array(
+      '#type' => 'submit',
+      '#value' => t('Generate SEO with OpenAI'),
+      '#submit' => array('openai_metatag_generate_submit'),
+      '#ajax' => array(
+        'callback' => 'openai_metatag_generate_ajax',
+        'wrapper' => $wrapper_id,
+        'method' => 'replace',
+        'effect' => 'fade',
+      ),
+      '#weight' => -9,
+    );
+  }
+
+  return $form;
+}
+
+/**
+ * AJAX callback: return the updated metatags language container.
+ */
+function openai_metatag_generate_ajax($form, &$form_state) {
+  $langcode = !empty($form['metatags']['#language']) ? $form['metatags']['#language'] : LANGUAGE_NONE;
+  return isset($form['metatags'][$langcode]) ? $form['metatags'][$langcode] : $form['metatags'];
+}
+
+/**
+ * Generate SEO suggestions via OpenAI for given title and body.
+ *
+ * @return array|null
+ *   Array with keys: title, description, og_title, og_description, keywords; or NULL on failure.
+ */
+function openai_metatag_generate_suggestions($title, $body_text) {
+  if (!module_exists('openai')) {
+    return NULL;
+  }
+  $api_key_name = config('openai.settings')->get('api_key');
+  $api_key = $api_key_name ? key_get_key_value($api_key_name) : '';
+  if (empty($api_key)) {
+    return NULL;
+  }
+
+  // Trim and limit context length to avoid token overuse.
+  $context_excerpt = trim(strip_tags(decode_entities($body_text)));
+  if (backdrop_strlen($context_excerpt) > 2000) {
+    $context_excerpt = backdrop_substr($context_excerpt, 0, 2000) . '…';
+  }
+
+  $prompt = "You are an SEO assistant for a CMS. Based on the provided content, suggest concise metadata.\n"
+    . "Return ONLY valid JSON with keys: title, description, og_title, og_description, keywords (comma-separated).\n"
+    . "Constraints: title <= 60 chars, description 140-160 chars, no quotes in values.\n\n"
+    . "Content title: " . (string) $title . "\n"
+    . "Content excerpt: " . (string) $context_excerpt . "\n";
+
+  // Prefer module-level options if configured, fall back to global openai.settings.
+  $opts = config_get('openai_metatag.settings', 'options');
+  $opts = is_array($opts) ? $opts : array();
+  $model = !empty($opts['ai_model']) ? $opts['ai_model'] : (config_get('openai.settings', 'default_text_model') ?: 'gpt-4o-mini');
+  $max_tokens = !empty($opts['ai_max_tokens']) ? (int) $opts['ai_max_tokens'] : 256;
+
+  try {
+    $api = new OpenAIApi($api_key);
+    $messages = array(
+      array('role' => 'system', 'content' => 'You generate SEO metadata for web pages.'),
+      array('role' => 'user', 'content' => $prompt),
+    );
+    $result = $api->chat($model, $messages, 0.4, $max_tokens, FALSE);
+
+    // Extract text; support both Chat and Responses API shapes.
+    $text = '';
+    if (is_array($result)) {
+      if (!empty($result['output_text'])) {
+        $text = trim((string) $result['output_text']);
+      }
+      if (empty($text) && !empty($result['output']) && is_array($result['output'])) {
+        foreach ($result['output'] as $outputItem) {
+          if (!empty($outputItem['content']) && is_array($outputItem['content'])) {
+            foreach ($outputItem['content'] as $contentPart) {
+              if (isset($contentPart['text']) && is_string($contentPart['text'])) {
+                $text .= $contentPart['text'];
+              }
+            }
+          }
+        }
+      }
+      $text = trim($text);
+    }
+    else {
+      $text = (string) $result;
+    }
+
+    if (empty($text)) {
+      return NULL;
+    }
+
+    // Strip code fences if any and decode JSON.
+    $text = trim($text);
+    if (strpos($text, '```') === 0) {
+      $text = trim(preg_replace('/^```[a-zA-Z]*\n?|```$/', '', $text));
+    }
+    $decoded = json_decode($text, TRUE);
+    if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+      // Normalize expected keys.
+      $title_sugg = isset($decoded['title']) ? trim($decoded['title']) : '';
+      $description_sugg = isset($decoded['description']) ? trim($decoded['description']) : '';
+      $og_title_sugg = isset($decoded['og_title']) ? trim($decoded['og_title']) : $title_sugg;
+      $og_description_sugg = isset($decoded['og_description']) ? trim($decoded['og_description']) : $description_sugg;
+
+      // Ensure description/og_description fit within 140-160 chars for SEO checks.
+      $description_sugg = openai_metatag_normalize_description($description_sugg, $title, $context_excerpt);
+      // If OG description missing or outside bounds, mirror normalized description.
+      if ($og_description_sugg === '' || mb_strlen(trim($og_description_sugg)) < 140 || mb_strlen(trim($og_description_sugg)) > 160) {
+        $og_description_sugg = $description_sugg;
+      }
+
+      return array(
+        'title' => $title_sugg,
+        'description' => $description_sugg,
+        'og_title' => $og_title_sugg,
+        'og_description' => $og_description_sugg,
+        'keywords' => isset($decoded['keywords']) ? $decoded['keywords'] : '',
+      );
+    }
+  }
+  catch (Exception $e) {
+    watchdog('openai_metatag', 'OpenAI error: @m', array('@m' => $e->getMessage()), WATCHDOG_ERROR);
+  }
+
+  return NULL;
+}
+
+/**
+ * Recursively collect human-readable text from form values arrays.
+ *
+ * Handles deeply nested structures such as Paragraphs, field collections, or
+ * custom compound fields. Stops when the limit is reached.
+ */
+function openai_metatag_collect_text_from_values($values, $limit = 4000) {
+  $out = '';
+  $stack = array($values);
+  $skip_keys = array('metatags', 'path', 'menu', 'revision', 'log', 'status', 'promote', 'sticky');
+  while (!empty($stack) && backdrop_strlen($out) < $limit) {
+    $cur = array_pop($stack);
+    if (is_string($cur)) {
+      $chunk = trim(strip_tags(decode_entities($cur)));
+      if ($chunk !== '') {
+        $space = ($out === '') ? '' : ' ';
+        $out .= $space . $chunk;
+      }
+      continue;
+    }
+    if (is_object($cur)) {
+      // If embedded entity present (e.g., paragraph), traverse its public props.
+      $cur = (array) $cur;
+    }
+    if (!is_array($cur)) {
+      continue;
+    }
+    foreach ($cur as $k => $v) {
+      if (in_array($k, $skip_keys, TRUE)) {
+        continue;
+      }
+      // Common text container keys.
+      if (is_array($v)) {
+        if (isset($v['value']) && is_string($v['value'])) {
+          $stack[] = $v['value'];
+          continue;
+        }
+        if (isset($v['safe_value']) && is_string($v['safe_value'])) {
+          $stack[] = $v['safe_value'];
+          continue;
+        }
+        if (isset($v['summary']) && is_string($v['summary'])) {
+          $stack[] = $v['summary'];
+          continue;
+        }
+        if (isset($v[LANGUAGE_NONE]) && is_array($v[LANGUAGE_NONE])) {
+          $stack[] = $v[LANGUAGE_NONE];
+          continue;
+        }
+        // Paragraphs often include 'entity' => object.
+        if (isset($v['entity'])) {
+          $stack[] = $v['entity'];
+          continue;
+        }
+      }
+      $stack[] = $v;
+    }
+  }
+  if (backdrop_strlen($out) > $limit) {
+    $out = backdrop_substr($out, 0, $limit) . '…';
+  }
+  return $out;
+}
+
+/**
+ * Recursively collect human-readable text from an entity (node/paragraph).
+ */
+function openai_metatag_collect_text_from_entity($entity, $langcode = NULL, $limit = 4000) {
+  if (empty($entity)) {
+    return '';
+  }
+  $out = '';
+  $arr = (array) $entity;
+  $skip_props = array('metatags', 'revision', 'rdf_mapping');
+  foreach ($arr as $key => $val) {
+    if (in_array($key, $skip_props, TRUE)) {
+      continue;
+    }
+    // Field API typical shapes.
+    if (is_array($val)) {
+      // Language-specific first.
+      if ($langcode && isset($val[$langcode]) && is_array($val[$langcode])) {
+        $out .= ' ' . openai_metatag_collect_text_from_values($val[$langcode], $limit);
+      }
+      elseif (isset($val[LANGUAGE_NONE]) && is_array($val[LANGUAGE_NONE])) {
+        $out .= ' ' . openai_metatag_collect_text_from_values($val[LANGUAGE_NONE], $limit);
+      }
+      else {
+        $out .= ' ' . openai_metatag_collect_text_from_values($val, $limit);
+      }
+    }
+    elseif (is_string($val)) {
+      $out .= ' ' . trim(strip_tags(decode_entities($val)));
+    }
+    if (backdrop_strlen($out) >= $limit) {
+      break;
+    }
+  }
+  $out = trim(preg_replace('/\s+/', ' ', $out));
+  if (backdrop_strlen($out) > $limit) {
+    $out = backdrop_substr($out, 0, $limit) . '…';
+  }
+  return $out;
+}
+
+/**
+ * Recursively find a metatag element's 'value' sub-element by tag key.
+ *
+ * Returns a reference suitable for form_set_value(). If not found, returns a
+ * NULL reference. This searches within grouped containers like 'basic',
+ * 'advanced', 'open-graph', etc.
+ *
+ * @param array $container
+ *   The metatags language container array, e.g. $form['metatags'][$lang].
+ * @param string $tag_key
+ *   The metatag machine name, e.g. 'title', 'description', 'og:title'.
+ *
+ * @return array|null
+ *   Reference to the 'value' element array, or NULL if not found.
+ */
+function &openai_metatag_find_value_element_ref(&$container, $tag_key) {
+  $null = NULL;
+  if (!is_array($container)) {
+    return $null;
+  }
+  // Direct child check first.
+  if (isset($container[$tag_key]) && is_array($container[$tag_key]) && isset($container[$tag_key]['value'])) {
+    return $container[$tag_key]['value'];
+  }
+  // Depth-first search through child arrays (skip properties starting with '#').
+  foreach ($container as $k => &$v) {
+    if (is_string($k) && $k !== '' && $k[0] === '#') {
+      continue;
+    }
+    if (is_array($v)) {
+      // If this child itself is the tag container.
+      if ($k === $tag_key && isset($v['value'])) {
+        return $v['value'];
+      }
+      $found = &openai_metatag_find_value_element_ref($v, $tag_key);
+      if (isset($found)) {
+        return $found;
+      }
+    }
+  }
+  return $null;
+}
+
+/**
+ * Collect available metatag keys that have a 'value' input anywhere in container.
+ */
+function openai_metatag_collect_available_keys_recursive($container, &$out = array()) {
+  if (!is_array($container)) {
+    return $out;
+  }
+  foreach ($container as $k => $v) {
+    if (is_string($k) && $k !== '' && $k[0] === '#') {
+      continue;
+    }
+    if (is_array($v)) {
+      if (isset($v['value'])) {
+        // $k here should be the metatag key like 'title' or 'og:title'.
+        $out[$k] = TRUE;
+      }
+      // Recurse deeper (handles group containers like 'basic', 'advanced', 'open-graph').
+      openai_metatag_collect_available_keys_recursive($v, $out);
+    }
+  }
+  return $out;
+}
+
+/**
+ * Submit handler: call OpenAI and populate metatag fields in the form state.
+ */
+function openai_metatag_generate_submit($form, &$form_state) {
+  // Prevent form submission; we only want to update form values.
+  $form_state['rebuild'] = TRUE;
+
+  // Collect context from the node form: title and body text.
+  $node = !empty($form['#entity']) ? $form['#entity'] : NULL;
+  $title = '';
+  if (!empty($form['#title'])) {
+    $title = $form['#title'];
+  }
+  if (isset($form_state['values']['title'])) {
+    $title = is_array($form_state['values']['title']) && isset($form_state['values']['title'][0]['value']) ? $form_state['values']['title'][0]['value'] : $form_state['values']['title'];
+  }
+
+  $body_text = '';
+  if (!empty($form_state['values']) && is_array($form_state['values'])) {
+    $body_text = openai_metatag_collect_text_from_values($form_state['values'], 4000);
+  }
+  if (empty($body_text) && $node) {
+    $lang_for_text = !empty($form['metatags']['#language']) ? $form['metatags']['#language'] : LANGUAGE_NONE;
+    $body_text = openai_metatag_collect_text_from_entity($node, $lang_for_text, 4000);
+  }
+
+  $suggestions = openai_metatag_generate_suggestions($title, $body_text);
+  if (empty($suggestions)) {
+    backdrop_set_message(t('Could not generate suggestions from OpenAI.'), 'error');
+    return;
+  }
+
+  // Determine the correct metatags language container.
+  $langcode = !empty($form['metatags']['#language']) ? $form['metatags']['#language'] : LANGUAGE_NONE;
+  if (empty($form['metatags'][$langcode]) || !is_array($form['metatags'][$langcode])) {
+    // Fall back to the first available container under metatags.
+    foreach ($form['metatags'] as $k => $v) {
+      if (is_string($k) && $k !== '' && $k[0] === '#') {
+        continue;
+      }
+      if (is_array($v)) {
+        $langcode = $k;
+        break;
+      }
+    }
+  }
+
+  // Collect available keys for diagnostics (searching recursively under groups).
+  $available_map = array();
+  if (!empty($form['metatags'][$langcode]) && is_array($form['metatags'][$langcode])) {
+    openai_metatag_collect_available_keys_recursive($form['metatags'][$langcode], $available_map);
+  }
+  $available = array_keys($available_map);
+
+  // Helper to set a value if that element exists (recursively).
+  $set_if_exists = function($key_path, $value) use (&$form, &$form_state, $langcode) {
+    if (empty($form['metatags'][$langcode]) || !is_array($form['metatags'][$langcode])) {
+      return FALSE;
+    }
+    $ref = &openai_metatag_find_value_element_ref($form['metatags'][$langcode], $key_path);
+    if (isset($ref)) {
+      // Ensure the element has a concrete value for this rebuild cycle so that
+      // theme_textarea()/theme_textfield() see a '#value'. Also set default for
+      // subsequent rebuilds and set the submitted value in form_state.
+      $ref['#value'] = $value;
+      $ref['#default_value'] = $value;
+      form_set_value($ref, $value, $form_state);
+      // Also update raw input array to reflect the change for AJAX callbacks.
+      if (!isset($form_state['input'])) {
+        $form_state['input'] = array();
+      }
+      if (!isset($form_state['input']['metatags'])) {
+        $form_state['input']['metatags'] = array();
+      }
+      if (!isset($form_state['input']['metatags'][$langcode])) {
+        $form_state['input']['metatags'][$langcode] = array();
+      }
+      if (!isset($form_state['input']['metatags'][$langcode][$key_path])) {
+        $form_state['input']['metatags'][$langcode][$key_path] = array();
+      }
+      $form_state['input']['metatags'][$langcode][$key_path]['value'] = $value;
+      return TRUE;
+    }
+    return FALSE;
+  };
+
+  // Determine enabled text tags from Metatag settings and info.
+  $enabled_text_tags = openai_metatag_get_enabled_text_tags();
+  $filled = 0;
+  foreach ($available as $tag_key) {
+    if (!isset($enabled_text_tags[$tag_key])) {
+      continue; // Not enabled globally.
+    }
+    $value = openai_metatag_pick_suggestion_value($tag_key, $suggestions);
+    if ($value !== '') {
+      $filled += $set_if_exists($tag_key, $value) ? 1 : 0;
+    }
+  }
+
+  if ($filled > 0) {
+    backdrop_set_message(t('SEO meta tags generated and populated. Review before saving.'));
+  }
+  else {
+    // Provide richer diagnostics for admins and in logs.
+    watchdog('openai_metatag', 'No matching metatag fields found. Lang "@lang"; available keys: @keys', array('@lang' => $langcode, '@keys' => implode(', ', $available)), WATCHDOG_WARNING);
+    $lang_hint = ($langcode === LANGUAGE_NONE) ? ' ' . t('(Language module is disabled; using language "und".)') : '';
+    if (user_access('administer site configuration')) {
+      $details = empty($available) ? t('none') : check_plain(implode(', ', $available));
+      backdrop_set_message(t('No matching metatag fields found to populate.@hint Available keys for this form: @keys', array('@keys' => $details, '@hint' => $lang_hint)), 'warning');
+    }
+    else {
+      backdrop_set_message(t('No matching metatag fields found to populate.@hint', array('@hint' => $lang_hint)), 'warning');
+    }
+  }
+}
+
+
+/**
+ * Implements hook_node_presave().
+ *
+ * Auto-generate missing meta tags on save when enabled in settings.
+ */
+function openai_metatag_node_presave($node) {
+  // Check global toggle.
+  $auto = (int) (config_get('openai_metatag.settings', 'auto_generate_on_save') ?: 0);
+  if (!$auto) {
+    return;
+  }
+
+  // Respect per-bundle enable setting (default all on if config absent).
+  $bundle = isset($node->type) ? $node->type : NULL;
+  $types = node_type_get_types();
+  $all_enabled_default = array_fill_keys(array_keys($types), 1);
+  $enabled_bundles = config_get('openai_metatag.settings', 'enabled_bundles');
+  if (!is_array($enabled_bundles)) {
+    $enabled_bundles = $all_enabled_default;
+  }
+  if (empty($bundle) || empty($enabled_bundles[$bundle])) {
+    return;
+  }
+
+  // Determine language for metatags.
+  $langcode = LANGUAGE_NONE;
+  if (function_exists('metatag_entity_get_language')) {
+    $langcode = metatag_entity_get_language('node', $node);
+  }
+  if (empty($langcode)) {
+    $langcode = LANGUAGE_NONE;
+  }
+
+  // Ensure container arrays exist.
+  if (!isset($node->metatags) || !is_array($node->metatags)) {
+    $node->metatags = array();
+  }
+  if (!isset($node->metatags[$langcode]) || !is_array($node->metatags[$langcode])) {
+    $node->metatags[$langcode] = array();
+  }
+
+  // Helper to read current value.
+  $get_val = function($tag) use ($node, $langcode) {
+    return isset($node->metatags[$langcode][$tag]['value']) ? trim($node->metatags[$langcode][$tag]['value']) : '';
+  };
+
+  // Determine enabled text tags, then check which are empty on this node.
+  $enabled_text_tags = openai_metatag_get_enabled_text_tags();
+  $empties = array();
+  foreach ($enabled_text_tags as $tag => $_) {
+    if ($get_val($tag) === '') {
+      $empties[$tag] = TRUE;
+    }
+  }
+
+  watchdog('openai_metatag', 'Presave: bundle=@bundle lang=@lang empty tags: @tags', array(
+    '@bundle' => $bundle,
+    '@lang' => $langcode,
+    '@tags' => empty($empties) ? t('none') : implode(', ', array_keys($empties)),
+  ), WATCHDOG_DEBUG);
+
+  if (empty($empties)) {
+    return; // Nothing to do.
+  }
+
+  // Build content context.
+  $title_text = isset($node->title) ? $node->title : '';
+  // For paragraphs-based sites, walk the entity structure for text content.
+  $body_text = openai_metatag_collect_text_from_entity($node, $langcode, 4000);
+
+  $suggestions = openai_metatag_generate_suggestions($title_text, $body_text);
+  if (empty($suggestions)) {
+    // Do not block save; just log.
+    watchdog('openai_metatag', 'Auto-generate skipped: no suggestions produced.', array(), WATCHDOG_WARNING);
+    return;
+  }
+
+  // Helper to set if empty only.
+  $set_if_empty = function($tag, $value) use (&$node, $langcode, $get_val) {
+    if ($get_val($tag) === '' && $value !== '') {
+      $node->metatags[$langcode][$tag]['value'] = $value;
+      return TRUE;
+    }
+    return FALSE;
+  };
+
+  $changed = array();
+  foreach (array_keys($empties) as $tag) {
+    $value = openai_metatag_pick_suggestion_value($tag, $suggestions);
+    if ($value !== '' && $set_if_empty($tag, $value)) {
+      $changed[] = $tag;
+    }
+  }
+
+  if (!empty($changed)) {
+    watchdog('openai_metatag', 'Presave: populated tags (@tags).', array('@tags' => implode(', ', $changed)), WATCHDOG_INFO);
+  }
+}
+
+/**
+ * Implements hook_node_submit().
+ *
+ * Run the same logic during form submit to ensure values are present even if
+ * presave timing differs in some flows. It remains idempotent (only fills empty
+ * fields), so running twice is safe.
+ */
+function openai_metatag_node_submit($node, $form, &$form_state) {
+  openai_metatag_node_presave($node);
+}
+
+
+/**
+ * Return default mapping of suggestion keys to metatag machine names.
+ *
+ * Suggestion keys: title, description, og_title, og_description, keywords.
+ * Each maps to an array of metatag keys to populate.
+ */
+/**
+ * Determine which metatag keys are enabled and should be auto-filled.
+ *
+ * Uses Metatag's own info and settings to get only enabled tags, then filters
+ * to text-like tags we can safely generate: title, description, abstract,
+ * keywords, and their OG/Twitter variants (e.g., og:title, twitter:description).
+ */
+function openai_metatag_get_enabled_text_tags() {
+  $enabled = array();
+  if (!module_exists('metatag')) {
+    return $enabled;
+  }
+  // Get only enabled tags (metatag_get_info() without include_disabled).
+  $tags_info = metatag_get_info('tags');
+  if (!is_array($tags_info)) {
+    return $enabled;
+  }
+  foreach ($tags_info as $machine_name => $info) {
+    // Heuristic: only consider text/list/title classes.
+    $class = isset($info['class']) ? $info['class'] : '';
+    $is_texty = in_array($class, array('BackdropTextMetaTag', 'BackdropTitleMetaTag', 'BackdropListMetaTag'));
+    if (!$is_texty) {
+      continue;
+    }
+    $name = strtolower($machine_name);
+    // Allow these patterns.
+    $allow = FALSE;
+    if ($name === 'title' || substr($name, -6) === ':title') {
+      $allow = TRUE;
+    }
+    elseif ($name === 'keywords') {
+      $allow = TRUE;
+    }
+    elseif ($name === 'description' || $name === 'abstract' || substr($name, -12) === ':description') {
+      $allow = TRUE;
+    }
+    // Exclude known non-textuals even if TextMetaTag (URLs, images, times).
+    if (strpos($name, 'url') !== FALSE || strpos($name, 'image') !== FALSE || strpos($name, 'updated') !== FALSE || strpos($name, 'modified') !== FALSE || strpos($name, 'published') !== FALSE || $name === 'canonical') {
+      $allow = FALSE;
+    }
+    if ($allow) {
+      $enabled[$machine_name] = TRUE;
+    }
+  }
+  return $enabled;
+}
+
+/**
+ * Choose which suggestion value to use for a given tag key.
+ */
+function openai_metatag_pick_suggestion_value($tag_key, array $s) {
+  $k = strtolower($tag_key);
+  // Keywords explicitly.
+  if ($k === 'keywords') {
+    return isset($s['keywords']) ? $s['keywords'] : '';
+  }
+  // Title-like.
+  if ($k === 'title' || substr($k, -6) === ':title') {
+    // Prefer OG-specific value for OG/Twitter variants.
+    if (strpos($k, 'og:') === 0 || strpos($k, 'twitter:') === 0) {
+      return !empty($s['og_title']) ? $s['og_title'] : (isset($s['title']) ? $s['title'] : '');
+    }
+    return isset($s['title']) ? $s['title'] : '';
+  }
+  // Description-like (also cover abstract).
+  if ($k === 'description' || $k === 'abstract' || substr($k, -12) === ':description') {
+    if (strpos($k, 'og:') === 0 || strpos($k, 'twitter:') === 0) {
+      return !empty($s['og_description']) ? $s['og_description'] : (isset($s['description']) ? $s['description'] : '');
+    }
+    return isset($s['description']) ? $s['description'] : '';
+  }
+  return '';
+}
+
+/**
+ * Normalize or generate a description that fits 140-160 characters.
+ *
+ * Attempts to preserve the provided description; if too short it appends
+ * contextual pieces (title, content excerpt). If too long it truncates
+ * gracefully to a word boundary. Guarantees a string of length >=140 (or
+ * pads minimally) and <=160.
+ */
+function openai_metatag_normalize_description($desc, $title = '', $context = '') {
+  $min = 140;
+  $max = 160;
+  $desc = trim(strip_tags((string) $desc));
+  $desc = preg_replace('/\s+/u', ' ', $desc);
+
+  $len = mb_strlen($desc);
+  if ($len >= $min && $len <= $max) {
+    return $desc;
+  }
+
+  // If too long, truncate to max and cut at last space to avoid mid-word.
+  if ($len > $max) {
+    $tr = mb_substr($desc, 0, $max);
+    $pos = mb_strrpos($tr, ' ');
+    if ($pos !== FALSE) {
+      $tr = mb_substr($tr, 0, $pos);
+    }
+    return rtrim($tr);
+  }
+
+  // Too short: try to extend using title and context.
+  $add = '';
+  if (!empty($title)) {
+    $add .= ' ' . trim(strip_tags((string) $title));
+  }
+  if (!empty($context)) {
+    $add .= ' ' . trim(strip_tags((string) $context));
+  }
+  $add = preg_replace('/\s+/u', ' ', trim($add));
+
+  $candidate = trim($desc . ($desc !== '' && $add !== '' ? ' ' : '') . $add);
+
+  // If still too short, append more words from context until we reach min.
+  if (mb_strlen($candidate) < $min && $add !== '') {
+    $words = preg_split('/\s+/u', $add, -1, PREG_SPLIT_NO_EMPTY);
+    $cur = $desc;
+    foreach ($words as $w) {
+      if ($cur !== '') $cur .= ' ';
+      $cur .= $w;
+      if (mb_strlen($cur) >= $min) {
+        break;
+      }
+    }
+    $candidate = $cur;
+  }
+
+  // Final truncate to max if needed, trimming to last space.
+  if (mb_strlen($candidate) > $max) {
+    $tr = mb_substr($candidate, 0, $max);
+    $pos = mb_strrpos($tr, ' ');
+    if ($pos !== FALSE) {
+      $tr = mb_substr($tr, 0, $pos);
+    }
+    $candidate = $tr;
+  }
+
+  // If still shorter than min, pad with a trailing ellipsis or periods.
+  if (mb_strlen($candidate) < $min) {
+    $candidate = str_pad($candidate, $min, '.');
+    $candidate = mb_substr($candidate, 0, $min);
+  }
+
+  return rtrim($candidate);
+}

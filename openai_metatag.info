@@ -1,0 +1,9 @@
+name = OpenAI Metatag Helper
+description = Adds a Generate SEO button on content edit forms to auto-fill Metatag fields using OpenAI.
+backdrop = 1.x
+type = module
+dependencies[] = openai
+dependencies[] = metatag
+dependencies[] = key
+package = OpenAI
+configure = admin/config/openai/metatag
