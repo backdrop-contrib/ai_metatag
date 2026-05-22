@@ -1,0 +1,8 @@
+{
+  "enabled_bundles": {},
+  "auto_generate_on_save": 1,
+  "options": {
+    "ai_model": "",
+    "ai_max_tokens": 256
+  }
+}

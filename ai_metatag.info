@@ -1,0 +1,8 @@
+name = AI Metatag Assistant
+description = Adds Generate SEO button on content edit forms to auto-fill Metatag fields using AI.
+backdrop = 1.x
+type = module
+package = AI
+configure = admin/config/ai/ai-metatag
+dependencies[] = ai
+dependencies[] = metatag

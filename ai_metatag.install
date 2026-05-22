@@ -1,0 +1,24 @@
+<?php
+
+/**
+ * Implements hook_install().
+ */
+function ai_metatag_install() {
+  if (!module_load_install('ai_upgrade')) { return []; }
+  ai_upgrade_module_install('ai_metatag');
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function ai_metatag_uninstall() {
+  config('ai_metatag.settings')->delete();
+}
+
+/**
+ * Implements hook_requirements().
+ */
+function ai_metatag_requirements($phase) {
+  if (!module_load_install('ai_upgrade')) { return []; }
+  return ai_upgrade_module_requirements($phase, 'ai_metatag');
+}
