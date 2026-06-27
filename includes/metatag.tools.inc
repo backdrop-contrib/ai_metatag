@@ -318,6 +318,7 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
     ->fields('n', ['nid', 'title', 'type'])
     ->condition('n.status', 1)
     ->orderBy('n.changed', 'DESC')
+    ->orderBy('n.nid', 'DESC')
     ->range(0, $scan_cap + 1);
   if ($bundle !== '') {
     $query->condition('n.type', $bundle);
