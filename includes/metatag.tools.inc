@@ -363,7 +363,7 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
     'field' => $field,
     'duplicate_groups' => count($groups),
     'groups' => $groups,
-    'scanned_nodes' => count($all_rows),
+    'scanned_nodes' => count($rows),
     'scan_truncated' => $scan_truncated,
   ];
 }
