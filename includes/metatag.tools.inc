@@ -314,11 +314,13 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
     ->fields('n', ['nid', 'title', 'type'])
     ->condition('n.status', 1)
     ->orderBy('n.changed', 'DESC')
-    ->range(0, $scan_cap);
+    ->range(0, $scan_cap + 1);
   if ($bundle !== '') {
     $query->condition('n.type', $bundle);
   }
-  $rows = $query->execute()->fetchAll();
+  $all_rows = $query->execute()->fetchAll();
+  $scan_truncated = count($all_rows) > $scan_cap;
+  $rows = $scan_truncated ? array_slice($all_rows, 0, $scan_cap) : $all_rows;
 
   $value_map = [];
   foreach ($rows as $row) {
@@ -357,7 +359,7 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
     'duplicate_groups' => count($groups),
     'groups' => $groups,
     'scanned_nodes' => count($rows),
-    'scan_truncated' => count($rows) >= $scan_cap,
+    'scan_truncated' => $scan_truncated,
   ];
 }
 
