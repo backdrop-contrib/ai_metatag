@@ -306,10 +306,15 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
   $bundle = isset($args['bundle']) ? trim((string) $args['bundle']) : '';
   $limit = isset($args['limit']) ? min(50, max(1, (int) $args['limit'])) : 10;
 
-  // Load all published nodes and collect metatag values.
+  // Load published nodes and collect metatag values. Hard-capped: every row
+  // here becomes a full node_load(), so an unbounded scan can exhaust memory
+  // on large sites.
+  $scan_cap = 1000;
   $query = db_select('node', 'n')
     ->fields('n', ['nid', 'title', 'type'])
-    ->condition('n.status', 1);
+    ->condition('n.status', 1)
+    ->orderBy('n.changed', 'DESC')
+    ->range(0, $scan_cap);
   if ($bundle !== '') {
     $query->condition('n.type', $bundle);
   }
@@ -351,6 +356,8 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
     'field' => $field,
     'duplicate_groups' => count($groups),
     'groups' => $groups,
+    'scanned_nodes' => count($rows),
+    'scan_truncated' => count($rows) >= $scan_cap,
   ];
 }
 

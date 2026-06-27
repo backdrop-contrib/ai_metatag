@@ -148,7 +148,7 @@ function ai_metatag_settings_form($form, &$form_state) {
     '#default_value' => isset($opts['ai_max_tokens']) ? (int) $opts['ai_max_tokens'] : 1000,
     '#min' => 64,
     '#max' => 2048,
-    '#description' => t('Maximum number of tokens the AI may return (min 64, max 2048].'),
+    '#description' => t('Maximum number of tokens the AI may return (min 64, max 2048).'),
   ];
 
   // Pre-submit: sanitize values before system_settings_form saves them.
@@ -247,13 +247,13 @@ function ai_metatag_default_ai_model(array $flat_models = [], $fallback = '') {
     }
   }
 
-  return ai_default_model_from_flat($flat_models, $fallback);
+  return _ai_metatag_model_from_flat($flat_models, $fallback);
 }
 
 /**
  * Picks a default from an already-flat models array.
  */
-function ai_default_model_from_flat(array $flat_models, $preferred) {
+function _ai_metatag_model_from_flat(array $flat_models, $preferred) {
   if (empty($flat_models)) {
     return $preferred;
   }
@@ -375,9 +375,9 @@ function ai_metatag_form_alter(&$form, &$form_state, $form_id) {
     $langcode = $form['metatags']['#language'];
   }
 
-  // Ensure the language container exists (Metatag builds metatags[$langcode)].
+  // Ensure the language container exists (Metatag builds metatags[$langcode]).
   if (empty($form['metatags'][$langcode]) || !is_array($form['metatags'][$langcode])) {
-    watchdog('ai_metatag', 'Form alter: metatags language container missing (@lang].', ['@lang' => $langcode], WATCHDOG_DEBUG);
+    watchdog('ai_metatag', 'Form alter: metatags language container missing (@lang).', ['@lang' => $langcode], WATCHDOG_DEBUG);
     return;
   }
 
@@ -471,8 +471,8 @@ function ai_metatag_generate_suggestions($title, $body_text) {
   }
 
   $prompt = "You are an SEO assistant for a CMS. Based on the provided content, suggest concise metadata.\n"
-    . "Return ONLY valid JSON with keys: title, description, og_title, og_description, og_type, keywords (comma-separated].\n"
-    . "og_type must be a valid Open Graph type (e.g. article, website, product, profile]. Use 'article' for most content pages.\n"
+    . "Return ONLY valid JSON with keys: title, description, og_title, og_description, og_type, keywords (comma-separated).\n"
+    . "og_type must be a valid Open Graph type (e.g. article, website, product, profile). Use 'article' for most content pages.\n"
     . "Constraints: title <= 60 chars, description 140-160 chars, no quotes in values.\n\n"
     . "=== CONTENT TITLE ===\n" . (string) $title . "\n"
     . "=== CONTENT EXCERPT ===\n" . (string) $context_excerpt . "\n"
@@ -783,20 +783,18 @@ function ai_metatag_generate_submit($form, &$form_state) {
       // Set the submitted value in form_state. The $ref array is passed by
       // value inside form_set_value so it only needs the #parents key.
       form_set_value($ref, $value, $form_state);
-      // Also update raw input array to reflect the change for AJAX callbacks.
-      if (!isset($form_state['input'])) {
+      // Also update the raw input array so the rebuilt form shows the value
+      // after the AJAX request. Use the element's own #parents so grouped
+      // tags (e.g. under an 'open-graph' fieldset) get the right input path.
+      if (!isset($form_state['input']) || !is_array($form_state['input'])) {
         $form_state['input'] = [];
       }
-      if (!isset($form_state['input']['metatags'])) {
-        $form_state['input']['metatags'] = [];
+      if (!empty($ref['#parents']) && is_array($ref['#parents'])) {
+        backdrop_array_set_nested_value($form_state['input'], $ref['#parents'], $value);
       }
-      if (!isset($form_state['input']['metatags'][$langcode])) {
-        $form_state['input']['metatags'][$langcode] = [];
+      else {
+        $form_state['input']['metatags'][$langcode][$key_path]['value'] = $value;
       }
-      if (!isset($form_state['input']['metatags'][$langcode][$key_path])) {
-        $form_state['input']['metatags'][$langcode][$key_path] = [];
-      }
-      $form_state['input']['metatags'][$langcode][$key_path]['value'] = $value;
       return TRUE;
     }
     return FALSE;
@@ -821,7 +819,7 @@ function ai_metatag_generate_submit($form, &$form_state) {
   else {
     // Provide richer diagnostics for admins and in logs.
     watchdog('ai_metatag', 'No matching metatag fields found. Lang "@lang"; available keys: @keys', ['@lang' => $langcode, '@keys' => implode(', ', $available)], WATCHDOG_WARNING);
-    $lang_hint = ($langcode === LANGUAGE_NONE) ? ' ' . t('(Language module is disabled; using language "und".]') : '';
+    $lang_hint = ($langcode === LANGUAGE_NONE) ? ' ' . t('(Language module is disabled; using language "und".)') : '';
     if (user_access('administer site configuration')) {
       $details = empty($available) ? t('none') : check_plain(implode(', ', $available));
       backdrop_set_message(t('No matching metatag fields found to populate.@hint Available keys for this form: @keys', ['@keys' => $details, '@hint' => $lang_hint]), 'warning');
@@ -970,7 +968,7 @@ function ai_metatag_node_presave($node) {
   }
 
   if (!empty($changed)) {
-    watchdog('ai_metatag', 'Presave: populated tags (@tags].', ['@tags' => implode(', ', $changed)], WATCHDOG_INFO);
+    watchdog('ai_metatag', 'Presave: populated tags (@tags).', ['@tags' => implode(', ', $changed)], WATCHDOG_INFO);
   }
 }
 
@@ -986,7 +984,7 @@ function ai_metatag_get_enabled_text_tags() {
   if (!module_exists('metatag')) {
     return $enabled;
   }
-  // Get only enabled tags (metatag_get_info() without include_disabled].
+  // Get only enabled tags (metatag_get_info() without include_disabled).
   $tags_info = metatag_get_info('tags');
   if (!is_array($tags_info)) {
     return $enabled;
