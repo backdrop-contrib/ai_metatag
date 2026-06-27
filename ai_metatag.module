@@ -780,16 +780,12 @@ function ai_metatag_generate_submit($form, &$form_state) {
     }
     $ref = &ai_metatag_find_value_element_ref($form['metatags'][$langcode], $key_path);
     if (isset($ref)) {
-      // Set the submitted value in form_state. The $ref array is passed by
-      // value inside form_set_value so it only needs the #parents key.
-      form_set_value($ref, $value, $form_state);
-      // Also update the raw input array so the rebuilt form shows the value
-      // after the AJAX request. Use the element's own #parents so grouped
-      // tags (e.g. under an 'open-graph' fieldset) get the right input path.
       if (!isset($form_state['input']) || !is_array($form_state['input'])) {
         $form_state['input'] = [];
       }
       if (!empty($ref['#parents']) && is_array($ref['#parents'])) {
+        // form_set_value() requires #parents to be present on the element.
+        form_set_value($ref, $value, $form_state);
         backdrop_array_set_nested_value($form_state['input'], $ref['#parents'], $value);
       }
       else {
