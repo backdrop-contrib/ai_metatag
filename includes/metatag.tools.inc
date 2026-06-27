@@ -91,7 +91,7 @@ function ai_metatag_tools_definitions() {
       'type' => 'function',
       'function' => [
         'name' => 'list_duplicate_metatag_values',
-        'description' => 'Find nodes that share identical literal values for a metatag field. Excludes pure token placeholders. Duplicate titles and descriptions hurt SEO.',
+        'description' => 'Find nodes that share identical literal values for a metatag field. Excludes pure token placeholders. Duplicate titles and descriptions hurt SEO. IMPORTANT: only the most-recently-changed published nodes up to an internal cap (1000) are inspected; check scan_truncated in the response before treating the result as exhaustive.',
         'parameters' => [
           'type' => 'object',
           'properties' => [
@@ -297,6 +297,10 @@ function ai_metatag_tool_list_nodes_missing_metatags(array $args) {
 
 /**
  * Executor: list_duplicate_metatag_values.
+ *
+ * Scans only the most-recently-changed published nodes up to a hard cap to
+ * avoid unbounded node_load() loops. The response includes scan_truncated=TRUE
+ * when the cap was reached and results may be incomplete.
  */
 function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
   $field = isset($args['field']) ? trim((string) $args['field']) : '';
