@@ -91,7 +91,7 @@ function ai_metatag_tools_definitions() {
       'type' => 'function',
       'function' => [
         'name' => 'list_duplicate_metatag_values',
-        'description' => 'Find nodes that share identical literal values for a metatag field. Excludes pure token placeholders. Duplicate titles and descriptions hurt SEO.',
+        'description' => 'Find nodes that share identical literal values for a metatag field. Excludes pure token placeholders. Duplicate titles and descriptions hurt SEO. IMPORTANT: only the most-recently-changed published nodes up to an internal cap (1000) are inspected; check scan_truncated in the response before treating the result as exhaustive.',
         'parameters' => [
           'type' => 'object',
           'properties' => [
@@ -297,6 +297,10 @@ function ai_metatag_tool_list_nodes_missing_metatags(array $args) {
 
 /**
  * Executor: list_duplicate_metatag_values.
+ *
+ * Scans only the most-recently-changed published nodes up to a hard cap to
+ * avoid unbounded node_load() loops. The response includes scan_truncated=TRUE
+ * when the cap was reached and results may be incomplete.
  */
 function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
   $field = isset($args['field']) ? trim((string) $args['field']) : '';
@@ -306,14 +310,22 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
   $bundle = isset($args['bundle']) ? trim((string) $args['bundle']) : '';
   $limit = isset($args['limit']) ? min(50, max(1, (int) $args['limit'])) : 10;
 
-  // Load all published nodes and collect metatag values.
+  // Load published nodes and collect metatag values. Hard-capped: every row
+  // here becomes a full node_load(), so an unbounded scan can exhaust memory
+  // on large sites.
+  $scan_cap = 1000;
   $query = db_select('node', 'n')
     ->fields('n', ['nid', 'title', 'type'])
-    ->condition('n.status', 1);
+    ->condition('n.status', 1)
+    ->orderBy('n.changed', 'DESC')
+    ->orderBy('n.nid', 'DESC')
+    ->range(0, $scan_cap + 1);
   if ($bundle !== '') {
     $query->condition('n.type', $bundle);
   }
-  $rows = $query->execute()->fetchAll();
+  $all_rows = $query->execute()->fetchAll();
+  $scan_truncated = count($all_rows) > $scan_cap;
+  $rows = $scan_truncated ? array_slice($all_rows, 0, $scan_cap) : $all_rows;
 
   $value_map = [];
   foreach ($rows as $row) {
@@ -351,6 +363,8 @@ function ai_metatag_tool_list_duplicate_metatag_values(array $args) {
     'field' => $field,
     'duplicate_groups' => count($groups),
     'groups' => $groups,
+    'scanned_nodes' => count($rows),
+    'scan_truncated' => $scan_truncated,
   ];
 }
 
