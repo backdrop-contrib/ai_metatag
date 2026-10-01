@@ -1,4 +1,4 @@
-(function (window, document, $, Drupal) {
+(function (window, document, $) {
   'use strict';
 
   function getPreviewRoot() {
@@ -58,11 +58,9 @@
     });
   }
 
-  Drupal = Drupal || window.Drupal || {};
-  Drupal.behaviors = Drupal.behaviors || {};
   Backdrop.behaviors.aiMetatagPreviewExtract = {
     attach: function (context) {
       bind(context || document);
     }
   };
-})(window, document, (window.jQuery || window.$), window.Drupal);
+})(window, document, (window.jQuery || window.$));
