@@ -101,6 +101,20 @@ function ai_metatag_settings_form($form, &$form_state) {
     '#description' => t('When enabled, the module will generate missing tags on save for the selected content types. Existing values are never overwritten.'),
   ];
 
+  $has_ai_async = module_exists('ai_async');
+  $form['auto_generate_async'] = [
+    '#type' => 'checkbox',
+    '#title' => t('Generate in background with ai_async'),
+    '#default_value' => (int) (config_get('ai_metatag.settings', 'auto_generate_async') ?? 1),
+    '#description' => t('When enabled and ai_async is active, auto-generation on save runs as a non-blocking background job so saving content is instant for editors.'),
+    '#states' => [
+      'visible' => [
+        ':input[name="auto_generate_on_save"]' => ['checked' => TRUE],
+      ],
+    ],
+    '#disabled' => !$has_ai_async,
+  ];
+
   $form['notes'] = [
     '#type' => 'markup',
     '#markup' => '<p>' . t('Note: Users must also have the permissions "Generate metatags with AI" and "Edit meta tags" (or "Administer meta tags"). The Metatag fieldset must be available on the content type.') . '</p>',
@@ -179,8 +193,9 @@ function ai_metatag_settings_form_submit($form, &$form_state) {
     }
     $form_state['values']['enabled_bundles'] = $normalized;
   }
-  // Also normalize the boolean checkbox.
+  // Also normalize the boolean checkboxes.
   $form_state['values']['auto_generate_on_save'] = !empty($form_state['values']['auto_generate_on_save']) ? 1 : 0;
+  $form_state['values']['auto_generate_async'] = !empty($form_state['values']['auto_generate_async']) ? 1 : 0;
 
   // Normalize options tree (ai_model, ai_max_tokens).
   if (!isset($form_state['values']['options']) || !is_array($form_state['values']['options'])) {
@@ -481,6 +496,13 @@ function ai_metatag_generate_suggestions($title, $body_text) {
   // Prefer module-level options if configured, fall back to global ai.settings.
   $opts = ai_metatag_get_options();
   $model = !empty($opts['ai_model']) ? $opts['ai_model'] : ai_metatag_default_ai_model();
+  if (empty($model) && function_exists('ai_default_model') && function_exists('ai_get_all_chat_models')) {
+    $model = ai_default_model(ai_get_all_chat_models());
+  }
+  if (empty($model)) {
+    watchdog('ai_metatag', 'No AI model configured or available for metatag generation.', [], WATCHDOG_ERROR);
+    return NULL;
+  }
   $max_tokens = !empty($opts['ai_max_tokens']) ? (int) $opts['ai_max_tokens'] : 256;
 
   // Ensure an API provider is available for the selected model. This avoids
@@ -534,6 +556,12 @@ function ai_metatag_generate_suggestions($title, $body_text) {
       $text = trim(preg_replace('/^```[a-zA-Z]*\n?|```$/', '', $text));
     }
     $decoded = json_decode($text, TRUE);
+    if (json_last_error() !== JSON_ERROR_NONE || !is_array($decoded)) {
+      // If direct decode failed, attempt regex extraction of the JSON object {...}
+      if (preg_match('/\{[\s\S]*\}/', $text, $matches)) {
+        $decoded = json_decode($matches[0], TRUE);
+      }
+    }
     if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
       // Normalize expected keys.
       $title_sugg = isset($decoded['title']) ? trim($decoded['title']) : '';
@@ -565,6 +593,12 @@ function ai_metatag_generate_suggestions($title, $body_text) {
         'og_type' => $og_type_sugg,
         'keywords' => isset($decoded['keywords']) ? $decoded['keywords'] : '',
       ];
+    }
+    else {
+      watchdog('ai_metatag', 'Failed to parse JSON response from AI: @err. Raw output: @raw', [
+        '@err' => json_last_error_msg(),
+        '@raw' => backdrop_substr($text, 0, 500),
+      ], WATCHDOG_WARNING);
     }
   }
   catch (\Exception $e) {
@@ -877,7 +911,7 @@ function ai_metatag_apply_ajax_wrapper(&$element, $wrapper_id) {
 function ai_metatag_node_presave($node) {
   // Check global toggle.
   $auto = (int) (config_get('ai_metatag.settings', 'auto_generate_on_save') ?: 0);
-  if (!$auto) {
+  if (!$auto || !empty($node->ai_metatag_async_saving)) {
     return;
   }
 
@@ -934,6 +968,16 @@ function ai_metatag_node_presave($node) {
     return; // Nothing to do.
   }
 
+  // If ai_async is enabled and auto_generate_async is not turned off,
+  // offload the AI generation to post-save so saving does not stall.
+  $use_async = module_exists('ai_async') && function_exists('ai_async_submit') && (config_get('ai_metatag.settings', 'auto_generate_async') ?? 1);
+  if ($use_async) {
+    $node->ai_metatag_queue_async = [
+      'langcode' => $langcode,
+    ];
+    return;
+  }
+
   // Build content context.
   $title_text = isset($node->title) ? $node->title : '';
   // For paragraphs-based sites, walk the entity structure for text content.
@@ -965,6 +1009,36 @@ function ai_metatag_node_presave($node) {
 
   if (!empty($changed)) {
     watchdog('ai_metatag', 'Presave: populated tags (@tags).', ['@tags' => implode(', ', $changed)], WATCHDOG_INFO);
+  }
+}
+
+/**
+ * Implements hook_node_insert().
+ */
+function ai_metatag_node_insert($node) {
+  _ai_metatag_check_queue_async($node);
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function ai_metatag_node_update($node) {
+  _ai_metatag_check_queue_async($node);
+}
+
+/**
+ * Helper to submit an async metatag generation job if queued on presave.
+ */
+function _ai_metatag_check_queue_async($node) {
+  if (!empty($node->ai_metatag_queue_async) && !empty($node->nid) && module_exists('ai_async') && function_exists('ai_async_submit')) {
+    $info = $node->ai_metatag_queue_async;
+    unset($node->ai_metatag_queue_async);
+    $langcode = !empty($info['langcode']) ? $info['langcode'] : LANGUAGE_NONE;
+
+    ai_async_submit('ai_metatag_async_generate_tags', [
+      'nid' => (int) $node->nid,
+      'langcode' => $langcode,
+    ]);
   }
 }
 
@@ -1153,4 +1227,165 @@ function ai_metatag_normalize_description($desc, $title = '', $context = '') {
   }
 
   return rtrim($candidate);
+}
+
+/**
+ * Implements hook_ai_agents_maintenance_task_info().
+ */
+function ai_metatag_ai_agents_maintenance_task_info() {
+  return [
+    'metatag_update' => [
+      'label' => t('Metatag update'),
+      'description' => t('Update a specific metatag value (such as description or title) on a node.'),
+      'entity_type' => 'node',
+      'apply_callback' => 'ai_metatag_maintenance_task_apply',
+      'has_automatic_apply' => TRUE,
+    ],
+  ];
+}
+
+/**
+ * Task handler: Apply metatag update to a node from the maintenance queue.
+ *
+ * @param array $item
+ *   Queue item array with keys: entity_id, bundle (tag name, e.g. 'description'), before_value, after_value.
+ * @param string $error
+ *   Error message populated if apply fails.
+ *
+ * @return bool
+ *   TRUE on success, FALSE on error.
+ */
+function ai_metatag_maintenance_task_apply(array &$item, &$error = '') {
+  $nid = (int) $item['entity_id'];
+  $node = node_load($nid);
+  if (!$node) {
+    $error = 'Node no longer exists.';
+    return FALSE;
+  }
+
+  $field = !empty($item['bundle']) ? trim((string) $item['bundle']) : 'description';
+  $expected_before = isset($item['before_value']) ? trim((string) $item['before_value']) : '';
+  $new_value = isset($item['after_value']) ? trim((string) $item['after_value']) : '';
+
+  $langcode = LANGUAGE_NONE;
+  if (function_exists('metatag_entity_get_language')) {
+    $langcode = metatag_entity_get_language('node', $node);
+  }
+  if (!isset($node->metatags) || !is_array($node->metatags)) {
+    $node->metatags = [];
+  }
+  if (!isset($node->metatags[$langcode]) || !is_array($node->metatags[$langcode])) {
+    $node->metatags[$langcode] = [];
+  }
+
+  $current_value = isset($node->metatags[$langcode][$field]['value']) ? trim((string) $node->metatags[$langcode][$field]['value']) : '';
+
+  if ($expected_before !== '' && $current_value !== '' && $current_value !== $expected_before && $current_value !== $new_value) {
+    $error = 'Current metatag value changed before apply.';
+    return FALSE;
+  }
+
+  $node->metatags[$langcode][$field]['value'] = $new_value;
+  node_save($node);
+  return TRUE;
+}
+
+/**
+ * Implements hook_ai_async_callbacks().
+ */
+function ai_metatag_ai_async_callbacks() {
+  return [
+    'ai_metatag_async_generate_tags' => t('Auto-generate missing meta tags for an entity in the background.'),
+  ];
+}
+
+/**
+ * Background worker callback for ai_async to auto-generate missing metatags.
+ *
+ * @param array $data
+ *   Job data containing:
+ *   - nid: int (Node ID)
+ *   - langcode: string (optional)
+ *
+ * @return array
+ *   Result with nid, status, and populated tags list.
+ */
+function ai_metatag_async_generate_tags(array $data) {
+  $nid = !empty($data['nid']) ? (int) $data['nid'] : 0;
+  $node = node_load($nid, NULL, TRUE);
+  if (!$node) {
+    throw new Exception(t('Node @nid not found for metatag generation.', ['@nid' => $nid]));
+  }
+
+  $bundle = isset($node->type) ? $node->type : '';
+  $langcode = !empty($data['langcode']) ? $data['langcode'] : LANGUAGE_NONE;
+  if (function_exists('metatag_entity_get_language')) {
+    $langcode = metatag_entity_get_language('node', $node);
+  }
+  if (empty($langcode)) {
+    $langcode = LANGUAGE_NONE;
+  }
+
+  if (!isset($node->metatags) || !is_array($node->metatags)) {
+    $node->metatags = [];
+  }
+  if (!isset($node->metatags[$langcode]) || !is_array($node->metatags[$langcode])) {
+    $node->metatags[$langcode] = [];
+  }
+
+  $get_val = function($tag) use ($node, $langcode) {
+    return isset($node->metatags[$langcode][$tag]['value']) ? trim((string) $node->metatags[$langcode][$tag]['value']) : '';
+  };
+
+  $enabled_text_tags = ai_metatag_get_presave_text_tags($node, 'node', $bundle, $langcode);
+  $empties = [];
+  foreach ($enabled_text_tags as $tag => $_) {
+    if ($get_val($tag) === '') {
+      $empties[$tag] = TRUE;
+    }
+  }
+
+  if (empty($empties)) {
+    return [
+      'nid' => $nid,
+      'status' => 'skipped',
+      'message' => 'No empty tags to populate.',
+    ];
+  }
+
+  $title_text = isset($node->title) ? $node->title : '';
+  $body_text = ai_metatag_collect_text_from_entity($node, $langcode, 4000);
+
+  $suggestions = ai_metatag_generate_suggestions($title_text, $body_text);
+  if (empty($suggestions)) {
+    return [
+      'nid' => $nid,
+      'status' => 'skipped',
+      'message' => 'No suggestions produced by AI model.',
+    ];
+  }
+
+  $changed = [];
+  foreach (array_keys($empties) as $tag) {
+    $value = ai_metatag_pick_suggestion_value($tag, $suggestions);
+    if ($value !== '' && $get_val($tag) === '') {
+      $node->metatags[$langcode][$tag]['value'] = $value;
+      $changed[] = $tag;
+    }
+  }
+
+  if (!empty($changed)) {
+    $node->ai_metatag_async_saving = TRUE;
+    node_save($node);
+    watchdog('ai_metatag', 'Async background job populated tags (@tags) for node @nid.', [
+      '@tags' => implode(', ', $changed),
+      '@nid' => $nid,
+    ], WATCHDOG_INFO);
+  }
+
+  return [
+    'nid' => $nid,
+    'status' => 'completed',
+    'changed_tags' => $changed,
+  ];
 }
