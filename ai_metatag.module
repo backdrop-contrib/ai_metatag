@@ -131,28 +131,11 @@ function ai_metatag_settings_form($form, &$form_state) {
   // Model selector: use ai module helper for all chat models from all providers.
   $model_options = ai_get_all_chat_models();
 
-  // Determine default model.
-  $default_model = config_get('ai.settings', 'default_text_model') ?: '';
-  $flat_models = [];
-  foreach ($model_options as $g_label => $g_items) {
-    if (is_array($g_items)) {
-      foreach ($g_items as $k => $v) { $flat_models[$k] = $v; }
-    } else {
-      $flat_models[$g_label] = $g_items;
-    }
-  }
-  if (!empty($flat_models) && !isset($flat_models[$default_model])) {
-    reset($flat_models);
-    $default_model = key($flat_models);
-  }
-
-  $default_model = ai_metatag_default_ai_model($flat_models, $default_model);
-
   $form['options']['ai_model'] = [
     '#type' => 'select',
     '#title' => t('AI model'),
-    '#options' => $model_options,
-    '#default_value' => isset($opts['ai_model']) && $opts['ai_model'] !== '' ? $opts['ai_model'] : $default_model,
+    '#options' => ai_model_options_with_default($model_options, 'text'),
+    '#default_value' => isset($opts['ai_model']) ? (string) $opts['ai_model'] : '',
     '#description' => t('Select which text model to use when generating metatags.'),
   ];
 
@@ -202,12 +185,11 @@ function ai_metatag_settings_form_submit($form, &$form_state) {
     $form_state['values']['options'] = [];
   }
   $opts =& $form_state['values']['options'];
-  $default_model = ai_metatag_default_ai_model();
   $opts += [
-    'ai_model' => $default_model,
+    'ai_model' => '',
     'ai_max_tokens' => 256,
   ];
-  $opts['ai_model'] = is_string($opts['ai_model']) && trim($opts['ai_model']) !== '' ? trim($opts['ai_model']) : $default_model;
+  $opts['ai_model'] = is_string($opts['ai_model']) ? trim($opts['ai_model']) : '';
   $opts['ai_max_tokens'] = (int) $opts['ai_max_tokens'];
   if ($opts['ai_max_tokens'] < 64) { $opts['ai_max_tokens'] = 64; }
   if ($opts['ai_max_tokens'] > 2048) { $opts['ai_max_tokens'] = 2048; }
