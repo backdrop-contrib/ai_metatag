@@ -32,6 +32,7 @@ This module is small and focused: it integrates with the `ai` module for API acc
 
 ## Requirements
 - Backdrop CMS 1.x
+- PHP 8.2 or later
 - Modules: `ai`, `metatag`.
 
 ## Troubleshooting
