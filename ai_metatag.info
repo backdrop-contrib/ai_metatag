@@ -1,4 +1,4 @@
-name = AI Metatag Assistant
+name = AI Metatag
 description = Adds Generate SEO button on content edit forms to auto-fill Metatag fields using AI.
 backdrop = 1.x
 php = 8.2
