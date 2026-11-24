@@ -1347,18 +1347,32 @@ function ai_metatag_async_generate_tags(array $data) {
     ];
   }
 
+  // The AI call can take a while and this job may run long after the editor
+  // saved (e.g. drained by cron). Re-read the current stored tags so we only
+  // fill what is still empty and never clobber edits made in the meantime.
+  $stored = metatag_metatags_load('node', $nid, $node->vid);
+  $current = isset($stored[$langcode]) && is_array($stored[$langcode]) ? $stored[$langcode] : [];
+
   $changed = [];
   foreach (array_keys($empties) as $tag) {
     $value = ai_metatag_pick_suggestion_value($tag, $suggestions);
-    if ($value !== '' && $get_val($tag) === '') {
-      $node->metatags[$langcode][$tag]['value'] = $value;
+    $existing = isset($current[$tag]['value']) ? trim((string) $current[$tag]['value']) : '';
+    if ($value !== '' && $existing === '') {
+      $current[$tag]['value'] = $value;
       $changed[] = $tag;
     }
   }
 
   if (!empty($changed)) {
-    $node->ai_metatag_async_saving = TRUE;
-    node_save($node);
+    // Save only the meta tags rather than calling node_save(). A full node
+    // save bumps {node}.changed, which makes any edit form the editor already
+    // has open fail validation with "The content on this page has either been
+    // modified by another user...", and can overwrite their field edits with
+    // the stale copy loaded at the start of this job.
+    metatag_metatags_save('node', $nid, $node->vid, [$langcode => $current], $bundle);
+    metatag_metatags_cache_clear('node', $nid);
+    entity_get_controller('node')->resetCache([$nid]);
+    cache_clear_all();
     watchdog('ai_metatag', 'Async background job populated tags (@tags) for node @nid.', [
       '@tags' => implode(', ', $changed),
       '@nid' => $nid,
